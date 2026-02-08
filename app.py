@@ -1,27 +1,86 @@
 import streamlit as st
-import pandas as pd
-# 기존에 사용하던 분석 라이브러리 (예: pdfplumber 등)를 여기에 가져오세요.
+import cv2
+import numpy as np
+import base64
+import difflib
+import pytesseract
+from PIL import Image
+from pdf2image import convert_from_path
+import io
 
-st.title("📂 PDF 비교 분석 서비스")
-st.write("수정 전과 수정 후의 PDF 파일을 올려주세요.")
+# 설정: Streamlit Cloud 서버 환경에 맞춰 Tesseract 경로 자동 설정
+# 서버에는 보통 기본 경로에 설치되므로 별도 경로 지정이 필요 없을 수 있습니다.
+# 만약 에러가 나면 이 부분을 조정합니다.
 
-# 1. 파일 업로드 버튼 만들기
-uploaded_files = st.file_uploader("PDF 파일을 선택하세요 (2개)", type=['pdf'], accept_multiple_files=True)
+st.set_page_config(page_title="라벨 체크 AI 리포트", layout="wide")
+st.title("🧪 전성분 변경 내역 정밀 분석")
+
+def get_data_from_upload(uploaded_file):
+    # 업로드된 파일을 바이너리로 읽어서 처리
+    file_bytes = uploaded_file.read()
+    
+    if uploaded_file.name.lower().endswith('.pdf'):
+        # PDF를 이미지로 변환
+        pages = convert_from_path(io.BytesIO(file_bytes))
+        img = np.array(pages[0])
+        text = pytesseract.image_to_string(pages[0], lang='kor+eng')
+    else:
+        # 일반 이미지 파일 처리
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # PIL/Streamlit 표시용
+        text = pytesseract.image_to_string(Image.open(io.BytesIO(file_bytes)), lang='kor+eng')
+    
+    # OpenCV 처리를 위해 BGR로 변환된 복사본 유지
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if len(img.shape) == 3 else img
+    return img_bgr, text
+
+# 파일 업로드
+uploaded_files = st.file_uploader("비교할 파일 2개를 선택하세요 (PDF, JPG, PNG)", type=['pdf', 'jpg', 'png'], accept_multiple_files=True)
 
 if len(uploaded_files) >= 2:
-    # 파일 이름순으로 정렬 (사용자님이 원하셨던 가나다/123 순)
     uploaded_files.sort(key=lambda x: x.name)
+    file1, file2 = uploaded_files[0], uploaded_files[1]
     
-    before_file = uploaded_files[0]
-    after_file = uploaded_files[1]
-    
-    st.success(f"비교 대상: {before_file.name} ↔ {after_file.name}")
+    if st.button("🚀 정밀 분석 시작"):
+        with st.spinner('이미지 대조 및 OCR 분석 중...'):
+            try:
+                img1, text1 = get_data_from_upload(file1)
+                img2, text2 = get_data_from_upload(file2)
 
-    # 2. 분석 실행 버튼
-    if st.button("분석 시작"):
-        with st.spinner('데이터를 비교 중입니다...'):
-            # 여기에 기존 final_report.py의 핵심 분석 로직을 넣습니다.
-            # (예: 분석 결과 데이터프레임 생성 등)
-            st.write("### 분석 결과")
-            # 임시 결과 출력 예시
-            st.info("여기에 수정된 내용이 표나 리포트로 나타납니다.")
+                # --- 이미지 하이라이트 로직 ---
+                height, width = img2.shape[:2]
+                img1_resized = cv2.resize(img1, (width, height))
+                diff = cv2.absdiff(img1_resized, img2)
+                gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+                _, thresh = cv2.threshold(gray, 30, 255, cv2.THRESH_BINARY)
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                overlay = img2.copy()
+                for contour in contours:
+                    if cv2.contourArea(contour) > 50:
+                        x, y, w, h = cv2.boundingRect(contour)
+                        cv2.rectangle(overlay, (x, y), (x + w, y + h), (0, 0, 255), -1)
+
+                img2_highlighted = cv2.addWeighted(overlay, 0.25, img2, 0.75, 0)
+                
+                # --- 화면 표시용 변환 ---
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.image(cv2.cvtColor(img1_resized, cv2.COLOR_BGR2RGB), caption=f"수정 전: {file1.name}")
+                with col2:
+                    st.image(cv2.cvtColor(img2_highlighted, cv2.COLOR_BGR2RGB), caption=f"수정 후 (변경점 하이라이트): {file2.name}")
+
+                # --- 텍스트 비교 로직 ---
+                list1, list2 = text1.split(), text2.split()
+                d = difflib.Differ()
+                diff_result = list(d.compare(list1, list2))
+                
+                changes = []
+                i = 0
+                while i < len(diff_result):
+                    if i + 1 < len(diff_result) and diff_result[i].startswith('- ') and diff_result[i+1].startswith('+ '):
+                        changes.append({"구분": "내용 수정", "기존": diff_result[i][2:], "변경": diff_result[i+1][2:]})
+                        i += 2
+                    elif diff_result[i].startswith('- '):
+                        changes.
