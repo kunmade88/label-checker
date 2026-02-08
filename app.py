@@ -1,4 +1,31 @@
-# ... (상단 import 및 get_data_from_upload 함수는 동일) ...
+import streamlit as st
+import cv2
+import numpy as np
+import pytesseract
+from PIL import Image
+from pdf2image import convert_from_bytes
+import pandas as pd
+
+# 1. 페이지 설정
+st.set_page_config(page_title="라벨 체크 AI 리포트", layout="wide")
+st.title("🔍 전성분 문구 변경 정밀 분석 리포트 test 용훈")
+
+# 2. 이미지 처리 함수
+def get_data_from_upload(uploaded_file):
+    file_bytes = uploaded_file.read()
+    if uploaded_file.name.lower().endswith('.pdf'):
+        pages = convert_from_bytes(file_bytes)
+        img = np.array(pages[0].convert('RGB'))
+    else:
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    ocr_data = pytesseract.image_to_data(img, lang='kor+eng', output_type=pytesseract.Output.DICT)
+    return img, ocr_data
+
+# 3. 파일 업로더 (여기가 누락되어서 에러가 났던 겁니다!)
+uploaded_files = st.file_uploader("비교할 파일 2개를 선택하세요", type=['pdf', 'jpg', 'png'], accept_multiple_files=True)
 
 if len(uploaded_files) >= 2:
     uploaded_files.sort(key=lambda x: x.name)
@@ -9,54 +36,40 @@ if len(uploaded_files) >= 2:
                 img1, data1 = get_data_from_upload(uploaded_files[0])
                 img2, data2 = get_data_from_upload(uploaded_files[1])
 
-                # 시각화용 배경 이미지 (이미지 2 기준)
                 overlay = img2.copy()
                 changes = []
 
-                # [STEP 1] 이미지 1의 단어들을 집합(Set)으로 저장 (중복 제거 및 검색 최적화)
-                # 띄어쓰기 차이로 인한 오탐지를 막기 위해 공백을 제거하고 저장합니다.
+                # 이미지 1의 텍스트를 집합으로 저장 (공백 제거)
                 list1_content = set(t.strip().replace(" ", "") for t in data1['text'] if t.strip())
 
-                # [STEP 2] 이미지 2의 단어들을 하나씩 검사
                 for i in range(len(data2['text'])):
                     txt2_raw = data2['text'][i].strip()
-                    
-                    # 빈 칸이거나 OCR 신뢰도가 낮은 단어는 건너뜀
                     if not txt2_raw or int(data2['conf'][i]) < 45: 
                         continue
                     
-                    # 비교를 위해 이미지 2의 단어도 공백 제거
                     txt2_clean = txt2_raw.replace(" ", "")
                     
-                    # [STEP 3] 핵심 대조 로직
-                    # 이미지 1의 전성분 목록에 이미 존재하는 단어라면 하이라이트 하지 않음!
+                    # 이미 있는 단어면 패스, 없는 단어면 하이라이트
                     if txt2_clean in list1_content:
                         continue 
                     
-                    # 여기에 걸린다면 "내용이 바뀌었거나 새로 추가된" 단어임
                     tx, ty, tw, th = data2['left'][i], data2['top'][i], data2['width'][i], data2['height'][i]
-                    
-                    # 해당 단어 위치에만 빨간색 음영 처리
                     roi = overlay[ty:ty+th, tx:tx+tw]
                     red_rect = np.full(roi.shape, (255, 0, 0), dtype=np.uint8)
                     overlay[ty:ty+th, tx:tx+tw] = cv2.addWeighted(roi, 0.7, red_rect, 0.3, 0)
                     
-                    changes.append({
-                        "상태": "🔄 문구 변경/추가", 
-                        "내용": txt2_raw, 
-                        "비고": "원본에 없는 텍스트"
-                    })
+                    changes.append({"상태": "🔄 문구 변경/추가", "내용": txt2_raw, "비고": "원본에 없는 텍스트"})
 
-                # [STEP 4] 결과 출력
+                # 결과 출력
                 col1, col2 = st.columns(2)
                 with col1: st.image(img1, caption="수정 전 (원본)", use_container_width=True)
-                with col2: st.image(overlay, caption="변경 문구 타겟 분석 (빨간색만 확인하세요)", use_container_width=True)
+                with col2: st.image(overlay, caption="변경 문구 분석 (빨간색 확인)", use_container_width=True)
 
-                st.subheader("📋 변경 내용 리포트")
                 if changes:
                     st.table(pd.DataFrame(changes))
+                    st.balloons()
                 else:
-                    st.success("모든 전성분 문구가 일치합니다.")
+                    st.success("모든 문구가 일치합니다.")
 
             except Exception as e:
                 st.error(f"분석 오류: {e}")
