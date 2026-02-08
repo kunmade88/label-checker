@@ -10,8 +10,7 @@ import re
 st.set_page_config(page_title="라벨 체크 AI 정밀 분석", layout="wide")
 
 # --- 유틸리티 함수 ---
-def get_clean_image(uploaded_file):
-    """배경은 완전 흰색, 글자는 진한 검정색으로 변환"""
+def get_images(uploaded_file):
     file_bytes = uploaded_file.read()
     if uploaded_file.name.lower().endswith('.pdf'):
         pages = convert_from_bytes(file_bytes, dpi=300)
@@ -20,22 +19,20 @@ def get_clean_image(uploaded_file):
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    dist = cv2.fastNlMeansDenoising(gray, h=10)
-    # OTSU 이진화로 배경과 글자 분리
-    _, binary = cv2.threshold(dist, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     
-    if np.mean(binary) < 127: # 배경이 어두우면 반전
-        binary = cv2.bitwise_not(binary)
-    return cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
+    # 가독성용 흑백 변환 (배경 흰색, 글자 검정)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    view_img = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 21, 15)
+    
+    return img, cv2.cvtColor(view_img, cv2.COLOR_GRAY2RGB)
 
 def clean_for_match(text, is_ocr=False):
     if not text: return ""
-    # 전성분/Ingredients 제목 제외
+    # ✅ 줄바꿈(\n)과 공백을 모두 제거하여 한 줄로 통합 (줄바꿈 오류 방지)
+    text = text.replace('\n', ' ').replace('\r', ' ')
     if is_ocr:
         text = re.sub(r'전성분|Ingredients|INGREDIENTS|인그리디언트|전 성 분', '', str(text))
-    # 매칭용 알맹이 (기호 제거)
+    # 기호 제거 후 소문자로 통합
     return re.sub(r'[^a-zA-Z0-9가-힣]', '', text).lower().strip()
 
 # --- 사이드바 ---
@@ -48,96 +45,85 @@ with st.sidebar:
 
 # --- 모드 1: Excel vs PDF ---
 if mode == "Excel vs PDF (성분 검증)":
-    st.title("🔍 문안 전성분 검토 테스트 용훈")
+    st.title("🔍 문안 전성분 확인용 테스트 용훈")
     
     col1, col2 = st.columns(2)
     with col1:
         excel_file = st.file_uploader("📂 기준 엑셀 업로드", type=['xlsx', 'csv'])
     with col2:
-        pdf_file = st.file_uploader("📄 검토 PDF/이미지 업로드", type=['pdf', 'jpg', 'png'])
+        pdf_file = st.file_uploader("📄 검토 이미지 업로드", type=['pdf', 'jpg', 'png'])
 
     if excel_file and pdf_file:
-        st.markdown("---")
-        view_c1, view_c2 = st.columns(2)
+        ocr_img, view_img = get_images(pdf_file)
         
-        with view_c1:
-            st.subheader("📊 엑셀 데이터")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("📊 엑셀 기준")
             df_raw = pd.read_excel(excel_file) if excel_file.name.endswith('.xlsx') else pd.read_csv(excel_file)
             header_idx = next((i for i, row in df_raw.iterrows() if "No." in row.values), 0)
             df_display = pd.read_excel(excel_file, skiprows=header_idx + 1).head(int(compare_limit))
-            st.dataframe(df_display, height=600, use_container_width=True)
-
-        with view_c2:
-            st.subheader("🖼️ 가독성 최적화 이미지")
-            processed_img = get_clean_image(pdf_file)
-            st.image(processed_img, use_container_width=True)
+            st.dataframe(df_display, height=500, use_container_width=True)
+        with c2:
+            st.subheader("🖼️ 검토 이미지 (가독성 모드)")
+            st.image(view_img, use_container_width=True)
 
         if st.button("🚀 분석 시작", use_container_width=True):
-            # OCR 수행 및 원문 데이터 보존
-            ocr_text = pytesseract.image_to_string(processed_img, lang='kor+eng')
-            # 쉼표(,) 기준으로 쪼개서 리스트화 (이미지의 실제 전성분 순서 추적용)
-            raw_ocr_parts = [p.strip() for p in ocr_text.replace('\n', ' ').split(',') if p.strip()]
+            # OCR 및 줄바꿈 제거 처리
+            ocr_raw_text = pytesseract.image_to_string(ocr_img, lang='kor+eng')
+            compact_ocr = clean_for_match(ocr_raw_text, is_ocr=True)
+            
+            # PDF 텍스트를 쉼표 기준으로 쪼개서 대조 칸에 보여줄 준비
+            ocr_parts = [p.strip() for p in ocr_raw_text.replace('\n', ' ').split(',') if len(p.strip()) > 1]
 
             standard_list = df_display[lang_choice].dropna().astype(str).tolist()
             comparison = []
-            
-            # 매칭 로직
-            compact_ocr_blob = clean_for_match(ocr_text, is_ocr=True)
-            search_area = compact_ocr_blob
+            search_area = compact_ocr
 
             for i, std_name in enumerate(standard_list):
                 clean_std = clean_for_match(std_name)
-                detected_text = "미검출" # 기본값
+                found_text = "❌ 데이터 없음"
                 
                 if clean_std and clean_std in search_area:
                     status = "✅ 일치"
-                    # 실제 PDF에서 어떻게 읽혔는지 가장 유사한 조각을 찾아 기록
-                    # (단순 구현을 위해 엑셀 이름과 가장 닮은 OCR 조각 추출)
                     pos = search_area.find(clean_std)
                     search_area = search_area[pos + len(clean_std):]
-                    detected_text = std_name # 일치할 경우 엑셀명 표시
+                    found_text = std_name
                 else:
                     status = "❌ 오류"
-                    # 오류일 경우, 현재 search_area의 앞부분 일부를 보여줌 (뭐가 있는지 확인용)
-                    detected_text = f"(추정): {ocr_text.split(',')[i] if i < len(ocr_text.split(',')) else '데이터 없음'}"
-
-                comparison.append({
-                    "No": i+1,
-                    "엑셀 기준 (A)": std_name,
-                    "PDF 검출 내용 (B)": detected_text,
-                    "상태": status
-                })
+                    if i < len(ocr_parts):
+                        found_text = ocr_parts[i]
+                
+                comparison.append({"No": i+1, "엑셀 기준": std_name, "PDF 검출 내용": found_text, "상태": status})
 
             st.markdown("---")
-            st.subheader("📋 성분 대조 결과 리포트")
+            st.subheader("📋 분석 결과 (글자색 검정 고정)")
             res_df = pd.DataFrame(comparison)
-            
-            # 스타일 정의: A와 B가 다를 경우 강조
-            def highlight_diff(row):
-                if row['상태'] == "❌ 오류":
-                    return ['background-color: #f8d7da'] * len(row)
-                return ['background-color: #d4edda'] * len(row)
 
-            st.dataframe(res_df.style.apply(highlight_diff, axis=1), use_container_width=True, height=600)
+            # ✅ 스타일 수정: 배경색은 파스텔톤, 글자색은 검정(#000000)으로 고정
+            def style_rows(row):
+                bg_color = '#d4edda' if row['상태'] == "✅ 일치" else '#f8d7da'
+                return [f'background-color: {bg_color}; color: #000000; font-weight: bold;'] * len(row)
+
+            st.dataframe(res_df.style.apply(style_rows, axis=1), use_container_width=True, height=600)
 
 # --- 모드 2: PDF vs PDF ---
 elif mode == "PDF vs PDF (시각적 차이)":
-    st.title("🖼️ 문안검토 수정전/후 비교 테스트 용훈")
-    # (이전의 시각적 차이 분석 코드와 동일하여 유지됩니다)
-    f_old = st.file_uploader("원본 업로드", type=['pdf', 'jpg', 'png'], key="old")
-    f_new = st.file_uploader("수정본 업로드", type=['pdf', 'jpg', 'png'], key="new")
+    st.title("🖼️ 문안확인용 수정전/후 비교 테스트 용훈")
+    # ... (생략 없이 이전의 안정적인 차이 분석 로직 포함)
+    f_old = st.file_uploader("원본 업로드", key="o")
+    f_new = st.file_uploader("수정본 업로드", key="n")
     if f_old and f_new:
-        if st.button("🔍 차이점 분석 실행"):
-            img_old = get_clean_image(f_old)
-            img_new = get_clean_image(f_new)
-            h, w, _ = img_new.shape
-            img_old = cv2.resize(img_old, (w, h))
-            diff = cv2.absdiff(cv2.cvtColor(img_old, cv2.COLOR_RGB2GRAY), cv2.cvtColor(img_new, cv2.COLOR_RGB2GRAY))
+        if st.button("🔍 차이점 분석"):
+            img1, _ = get_images(f_old)
+            img2, _ = get_images(f_new)
+            h, w, _ = img2.shape
+            img1 = cv2.resize(img1, (w, h))
+            diff = cv2.absdiff(cv2.cvtColor(img1, cv2.COLOR_RGB2GRAY), cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY))
             _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            output = img_new.copy()
-            for cnt in contours:
-                if cv2.contourArea(cnt) > 50:
-                    x, y, w_b, h_b = cv2.boundingRect(cnt)
-                    cv2.rectangle(output, (x, y), (x + w_b, y + h_b), (255, 0, 0), 2)
-            st.image(output, use_container_width=True)
+            out = img2.copy()
+            for c in contours:
+                if cv2.contourArea(c) > 50:
+                    x, y, wb, hb = cv2.boundingRect(c)
+                    cv2.rectangle(out, (x, y), (x+wb, y+hb), (255, 0, 0), 2)
+            st.image(out, use_container_width=True)
