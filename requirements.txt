@@ -1,0 +1,4 @@
+streamlit
+pandas
+pdfplumber
+# 그 외 기존 코드에서 import 했던 라이브러리 이름들을 적어주세요.
