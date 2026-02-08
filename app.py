@@ -11,7 +11,7 @@ st.set_page_config(page_title="라벨 체크 AI 통합 시스템", layout="wide"
 
 # --- 유틸리티 함수 ---
 def get_clean_image(uploaded_file):
-    """이미지를 불러와서 배경은 흰색, 글자는 검정색으로 변환"""
+    """배경은 완전 흰색, 글자는 진한 검정색으로 변환"""
     file_bytes = uploaded_file.read()
     if uploaded_file.name.lower().endswith('.pdf'):
         pages = convert_from_bytes(file_bytes, dpi=300)
@@ -21,23 +21,27 @@ def get_clean_image(uploaded_file):
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    # --- 시각 최적화 전처리 (흑백 전환) ---
+    # 1. 그레이스케일 변환
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    # 그림자 제거 및 배경을 흰색으로, 글자를 검정색으로 강조 (Adaptive Threshold)
-    processed_img = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 31, 10
-    )
-    # 다시 RGB 형태로 변환하여 반환 (Streamlit 표시용)
-    return cv2.cvtColor(processed_img, cv2.COLOR_GRAY2RGB)
+    
+    # 2. 노이즈 제거 (글자 테두리 정리)
+    dist = cv2.fastNlMeansDenoising(gray, h=10)
+    
+    # 3. OTSU 이진화 (배경과 글자를 자동으로 분석해 흑백으로 나눔)
+    # 배경이 어두울 경우를 대비해 반전 처리가 필요하면 자동으로 보정
+    _, binary = cv2.threshold(dist, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 만약 배경이 검정색으로 나왔다면 다시 반전 (글자가 검정색이 되도록)
+    if np.mean(binary) < 127:
+        binary = cv2.bitwise_not(binary)
+
+    return cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
 
 def clean_for_match(text, is_ocr=False):
-    """기호 제거 및 제목 키워드 필터링"""
     if not text: return ""
-    # 1. OCR 결과에서만 '전성분', 'Ingredients' 제목 제외
+    # 전성분 관련 제목 키워드 삭제 (사용자 요청)
     if is_ocr:
-        text = re.sub(r'전성분|Ingredients|INGREDIENTS|인그리디언트', '', str(text))
-    # 2. 알맹이 글자만 남기기
+        text = re.sub(r'전성분|Ingredients|INGREDIENTS|인그리디언트|전 성 분', '', str(text))
     return re.sub(r'[^a-zA-Z0-9가-힣]', '', text).lower().strip()
 
 # --- 사이드바 ---
@@ -68,17 +72,14 @@ if mode == "Excel vs PDF (성분 검증)":
             df_raw = pd.read_excel(excel_file) if excel_file.name.endswith('.xlsx') else pd.read_csv(excel_file)
             header_idx = next((i for i, row in df_raw.iterrows() if "No." in row.values), 0)
             df_display = pd.read_excel(excel_file, skiprows=header_idx + 1).head(int(compare_limit))
-            # 엑셀 높이 확장
             st.dataframe(df_display, height=750, use_container_width=True)
 
         with view_c2:
-            st.subheader("🖼️ 가독성 최적화 이미지 (흑백 변환)")
-            # 배경 흰색, 글자 검정색으로 변환된 이미지 로드
+            st.subheader("🖼️ 가독성 최적화 (배경:흰색 / 글자:검정)")
             processed_img = get_clean_image(pdf_file)
             st.image(processed_img, use_container_width=True)
 
         if st.button("🚀 분석 시작", use_container_width=True):
-            # 변환된 이미지를 OCR에 사용
             ocr_text = pytesseract.image_to_string(processed_img, lang='kor+eng')
             compact_ocr = clean_for_match(ocr_text, is_ocr=True)
 
@@ -103,7 +104,7 @@ if mode == "Excel vs PDF (성분 검증)":
 
 # --- 모드 2: PDF vs PDF (시각적 차이) ---
 elif mode == "PDF vs PDF (시각적 차이)":
-    st.title("🖼️ 전성분 수정전/후 검토용 테스트 용훈")
+    st.title("🖼️ 문안검토용 수정전/후 비교테스트 용훈")
     col1, col2 = st.columns(2)
     with col1:
         f_old = st.file_uploader("📄 원본 업로드", type=['pdf', 'jpg', 'png'], key="old")
