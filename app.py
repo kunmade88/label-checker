@@ -31,7 +31,6 @@ def get_clean_image(uploaded_file):
 
 def clean_for_match(text):
     if not text: return ""
-    # 매칭용 순수 텍스트 (특수문자/공백 제거 후 소문자화)
     return re.sub(r'[^a-zA-Z0-9가-힣]', '', str(text)).lower().strip()
 
 # --- 사이드바 ---
@@ -44,8 +43,7 @@ with st.sidebar:
 
 # --- 모드 1: Excel vs PDF (엄격한 1:1 순서 대조) ---
 if mode == "Excel vs PDF (성분 검증)":
-    # 요청하신 제목 반영
-    st.title("🔍 문안확인 전성분 확인용 테스트 용훈")
+    st.title("🔍 문안확인 전성분 확인용 테스트 용훈") # 제목 유지
     
     col1, col2 = st.columns(2)
     with col1: excel_file = st.file_uploader("📂 기준 엑셀 업로드", type=['xlsx', 'csv'])
@@ -66,17 +64,23 @@ if mode == "Excel vs PDF (성분 검증)":
             st.image(processed_img, use_container_width=True)
 
         if st.button("🚀 1:1 순서 정밀 분석 시작", use_container_width=True):
-            # OCR 수행 (PSM 6: 단일 텍스트 블록)
+            # 1. OCR 수행
             ocr_text = pytesseract.image_to_string(processed_img, lang='kor+eng', config='--psm 6')
-            # 머리말 제거
-            pure_ocr = re.sub(r'전성분|Ingredients|INGREDIENTS|인그리디언트|전 성 분', '', ocr_text)
-            # 쉼표(,)를 기준으로만 정확히 쪼갬 (순서 보존의 핵심)
-            pdf_parts = [p.strip() for p in pure_ocr.replace('\n', ' ').split(',') if len(p.strip()) > 0]
+            
+            # 2. 숫자 사이 쉼표 보호 (1,2-헥산디올 매칭 실패 방지 핵심)
+            protected_text = re.sub(r'(\d+),(\d+)', r'\1_DIGIT_COMMA_\2', ocr_text)
+            
+            # 3. 제목 및 머리말 제거
+            pure_ocr = re.sub(r'전성분|Ingredients|INGREDIENTS|인그리디언트|전 성 분', '', protected_text)
+            
+            # 4. 쉼표로 분리 후 숨겨둔 숫자 쉼표 복구
+            raw_parts = pure_ocr.replace('\n', ' ').split(',')
+            pdf_parts = [p.replace('_DIGIT_COMMA_', ',').strip() for p in raw_parts if len(p.strip()) > 0]
             
             excel_list = df_display[lang_choice].dropna().astype(str).tolist()
             comparison = []
             
-            # ✅ 사용자님이 원하신 엄격한 1:1 비교 로직
+            # 5. 엄격한 1:1 비교 루프
             for i in range(len(excel_list)):
                 std_name = excel_list[i]
                 status = "❌ 오류"
@@ -84,12 +88,11 @@ if mode == "Excel vs PDF (성분 검증)":
                 
                 if i < len(pdf_parts):
                     actual_part = pdf_parts[i]
-                    detected_text = actual_part # PDF 조각 내용을 가감 없이 노출
+                    detected_text = actual_part 
                     
-                    # 엑셀 i번째와 PDF i번째 조각의 유사도 측정
+                    # 유사도 90% 기준
                     similarity = SequenceMatcher(None, clean_for_match(std_name), clean_for_match(actual_part)).ratio()
                     
-                    # 유사도가 90% 이상일 때만 일치로 간주
                     if similarity > 0.9:
                         status = "✅ 일치"
                     else:
@@ -106,7 +109,7 @@ if mode == "Excel vs PDF (성분 검증)":
             st.subheader("📋 성분 대조 결과 리포트")
             res_df = pd.DataFrame(comparison)
             
-            # 스타일: 배경색 파스텔, 글자색 진한 검정 고정
+            # 가독성 스타일 (글자색 검정 고정)
             def style_row(row):
                 bg = '#d4edda' if row['상태'] == "✅ 일치" else '#f8d7da'
                 return [f'background-color: {bg}; color: #000000; font-weight: bold; font-size: 14px;'] * len(row)
@@ -115,8 +118,7 @@ if mode == "Excel vs PDF (성분 검증)":
 
 # --- 모드 2: PDF vs PDF (시각적 차이 비교) ---
 elif mode == "PDF vs PDF (시각적 차이)":
-    # 요청하신 제목 반영
-    st.title("🖼️ 문안확인 수정전/후 확인용 테스트 용훈")
+    st.title("🖼️ 문안확인 수정전/후 확인용 테스트 용훈") # 제목 유지
     
     f_old = st.file_uploader("📄 원본(Base) 업로드", type=['pdf', 'jpg', 'png'], key="old")
     f_new = st.file_uploader("📄 수정본(New) 업로드", type=['pdf', 'jpg', 'png'], key="new")
