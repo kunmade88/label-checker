@@ -7,10 +7,10 @@ from pdf2image import convert_from_bytes
 import re
 
 st.set_page_config(page_title="라벨 체크 AI", layout="wide")
-st.title("🔍 전성분 정밀 분석 (모든 변경사항 음영 표기)")
+st.title("🔍 전성분 문안 확인 (모든 차이점 음영 표기)")
 
 def clean_text(text):
-    # 특수문자나 공백 차이로 인한 오탐지를 줄이기 위해 알맹이만 추출
+    # 공백과 특수문자만 제거하여 글자 알맹이만 비교
     return re.sub(r'[^가-힣a-zA-Z0-9]', '', text)
 
 def get_data_from_upload(uploaded_file):
@@ -24,40 +24,44 @@ def get_data_from_upload(uploaded_file):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return img, pytesseract.image_to_data(img, lang='kor+eng', output_type=pytesseract.Output.DICT)
 
-uploaded_files = st.file_uploader("파일 2개 선택 (순서대로 전/후)", type=['pdf', 'jpg', 'png'], accept_multiple_files=True)
+uploaded_files = st.file_uploader("파일 2개 선택 (1:수정전, 2:수정후)", type=['pdf', 'jpg', 'png'], accept_multiple_files=True)
 
 if len(uploaded_files) >= 2:
     uploaded_files.sort(key=lambda x: x.name)
     if st.button("🚀 분석 시작"):
-        img1, data1 = get_data_from_upload(uploaded_files[0])
-        img2, data2 = get_data_from_upload(uploaded_files[1])
-        overlay = img2.copy()
-        changes = []
+        try:
+            img1, data1 = get_data_from_upload(uploaded_files[0])
+            img2, data2 = get_data_from_upload(uploaded_files[1])
+            overlay = img2.copy()
+            changes = []
 
-        # 이미지 1과 2의 유효 단어 리스트를 순서대로 생성
-        list1_clean = [clean_text(t) for t in data1['text'] if t.strip()]
-        # 이미지 2는 좌표값(i)을 같이 저장
-        list2_info = [(i, clean_text(t), t) for i, t in enumerate(data2['text']) if t.strip() and int(data2['conf'][i]) >= 40]
+            # 이미지 1과 2의 모든 유효 단어를 순서대로 리스트화
+            list1_clean = [clean_text(t) for t in data1['text'] if t.strip()]
+            list2_all = [(i, clean_text(t), t) for i, t in enumerate(data2['text']) if t.strip() and int(data2['conf'][i]) >= 40]
 
-        # 이미지 2의 단어를 하나씩 꺼내어 이미지 1의 같은 순서와 대조
-        for j, (ocr_idx, txt2_clean, txt2_raw) in enumerate(list2_info):
-            is_mismatch = False
-            
-            # 1. 원본보다 순서가 길어지거나
-            # 2. 같은 순서(j번째)의 글자가 서로 다르면 무조건 음영 표기
-            if j >= len(list1_clean) or list1_clean[j] != txt2_clean:
-                is_mismatch = True
-
-            if is_mismatch:
-                x, y, w, h = data2['left'][ocr_idx], data2['top'][ocr_idx], data2['width'][ocr_idx], data2['height'][ocr_idx]
-                roi = overlay[y:y+h, x:x+w]
-                red = np.full(roi.shape, (255, 0, 0), dtype=np.uint8)
-                overlay[y:y+h, x:x+w] = cv2.addWeighted(roi, 0.7, red, 0.3, 0)
+            # 1:1로 엄격하게 대조 (순서/내용 하나라도 다르면 음영)
+            for j, (ocr_idx, txt2_clean, txt2_raw) in enumerate(list2_all):
+                is_different = False
                 
-                orig_txt = list1_clean[j] if j < len(list1_clean) else "없음"
-                changes.append({"순서": j + 1, "원본": orig_txt, "수정본": txt2_raw})
+                # 원본보다 단어가 많아졌거나, 해당 순서의 단어가 일치하지 않으면 무조건 표시
+                if j >= len(list1_clean) or list1_clean[j] != txt2_clean:
+                    is_different = True
 
-        c1, c2 = st.columns(2)
-        c1.image(img1, caption="[전] 이미지", use_container_width=True)
-        c2.image(overlay, caption="[후] 모든 변경사항 하이라이트", use_container_width=True)
-        if changes: st.table(pd.DataFrame(changes))
+                if is_different:
+                    x, y, w, h = data2['left'][ocr_idx], data2['top'][ocr_idx], data2['width'][ocr_idx], data2['height'][ocr_idx]
+                    roi = overlay[y:y+h, x:x+w]
+                    red = np.full(roi.shape, (255, 0, 0), dtype=np.uint8)
+                    overlay[y:y+h, x:x+w] = cv2.addWeighted(roi, 0.7, red, 0.3, 0)
+                    
+                    orig_txt = list1_clean[j] if j < len(list1_clean) else "(없음)"
+                    changes.append({"순서": j + 1, "원본 문구": orig_txt, "수정본 문구": txt2_raw})
+
+            col1, col2 = st.columns(2)
+            with col1: st.image(img1, caption="[전] 이미지", use_container_width=True)
+            with col2: st.image(overlay, caption="[후] 차이점 음영 표기 완료", use_container_width=True)
+            
+            if changes:
+                st.subheader("📋 변경 리스트")
+                st.table(pd.DataFrame(changes))
+        except Exception as e:
+            st.error(f"오류가 발생했습니다: {e}")
