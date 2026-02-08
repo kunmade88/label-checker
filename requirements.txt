@@ -1,8 +1,9 @@
 streamlit
 pandas
+numpy
 opencv-python-headless
 pytesseract
 pdf2image
 Pillow
-numpy
+openpyxl
 plotly

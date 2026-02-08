@@ -8,10 +8,10 @@ import re
 from difflib import SequenceMatcher
 
 st.set_page_config(page_title="라벨 체크 AI 리포트", layout="wide")
-st.title("🔍 전성분 문안 정밀 확인 용훈테스트중")
 
 def clean_text(text):
-    return re.sub(r'[^가-힣a-zA-Z0-9]', '', text)
+    """비교를 위해 특수문자 제거 및 소문자화 (한글 포함)"""
+    return re.sub(r'[^a-zA-Z0-9가-힣]', '', str(text)).lower().strip()
 
 def get_data_from_upload(uploaded_file):
     file_bytes = uploaded_file.read()
@@ -22,73 +22,82 @@ def get_data_from_upload(uploaded_file):
         nparr = np.frombuffer(file_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    
+    # lang='kor+eng'로 설정하여 한글과 영어를 동시에 인식
     ocr_data = pytesseract.image_to_data(img, lang='kor+eng', output_type=pytesseract.Output.DICT)
     return img, ocr_data
 
 def get_all_texts(ocr_data):
-    # 신뢰도 40 이상의 모든 텍스트를 순서대로 리스트화
-    return [t.strip() for i, t in enumerate(ocr_data['text']) if t.strip() and int(ocr_data['conf'][i]) >= 40]
+    valid_texts = [t.strip() for i, t in enumerate(ocr_data['text']) if t.strip() and int(ocr_data['conf'][i]) >= 30]
+    full_text = " ".join(valid_texts)
+    # 전성분 리스트는 콤마(,)가 기준이므로 콤마로 쪼개기
+    return [t.strip() for t in full_text.split(',') if t.strip()]
 
-uploaded_files = st.file_uploader("비교할 파일 2개를 선택하세요", type=['pdf', 'jpg', 'png'], accept_multiple_files=True)
+# --- 메인 UI ---
+st.title("🔍 전성분 문안 정밀 확인 시스템 테스트 용훈")
+mode = st.sidebar.radio("작업 모드 선택", ["Excel vs PDF (성분 순서 검증)", "PDF vs PDF (시각적 차이)"])
 
-if len(uploaded_files) >= 2:
-    uploaded_files.sort(key=lambda x: x.name)
+if mode == "Excel vs PDF (성분 순서 검증)":
+    st.subheader("📊 엑셀-이미지 전성분 대조")
     
-    if st.button("🚀 정밀 분석 시작"):
-        with st.spinner('이미지 및 순서 대조 중...'):
-            try:
-                img1, data1 = get_data_from_upload(uploaded_files[0])
-                img2, data2 = get_data_from_upload(uploaded_files[1])
+    # 언어 선택 추가
+    check_lang = st.radio("검증할 언어 선택", ["영문명", "한글명"], horizontal=True)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        excel_file = st.file_uploader("표준 전성분 엑셀 업로드", type=['xlsx', 'xls', 'csv'])
+    with col2:
+        pdf_file = st.file_uploader("검토할 이미지/PDF 업로드", type=['pdf', 'jpg', 'png'])
 
-                # 1. 픽셀 차이 감지 (사용자님이 선호하는 방식)
-                h, w, _ = img2.shape
-                img1_res = cv2.resize(img1, (w, h))
-                gray1 = cv2.cvtColor(img1_res, cv2.COLOR_RGB2GRAY)
-                gray2 = cv2.cvtColor(img2, cv2.COLOR_RGB2GRAY)
-                diff = cv2.absdiff(gray1, gray2)
-                _, thresh = cv2.threshold(diff, 30, 255, cv2.THRESH_BINARY)
-                
-                # 2. 텍스트 순서 및 오타 정밀 대조
-                lines1 = get_all_texts(data1)
-                lines2 = get_all_texts(data2)
-                
-                overlay = img2.copy()
-                changes = []
-                
-                # 순차적 1:1 대조 (순서가 틀리면 여기서 걸림)
-                max_len = max(len(lines1), len(lines2))
-                for i in range(max_len):
-                    l1 = lines1[i] if i < len(lines1) else " (항목 없음)"
-                    l2 = lines2[i] if i < len(lines2) else " (항목 없음)"
+    if excel_file and pdf_file:
+        if st.button("🚀 분석 시작"):
+            with st.spinner(f'{check_lang} 기준으로 대조 중...'):
+                try:
+                    # [1] 엑셀 처리
+                    df_raw = pd.read_excel(excel_file) if excel_file.name.endswith(('.xlsx', '.xls')) else pd.read_csv(excel_file)
+                    header_idx = next((i for i, row in df_raw.iterrows() if "No." in row.values), None)
                     
-                    if clean_text(l1) != clean_text(l2):
-                        changes.append({
-                            "순서": i + 1,
-                            "원본(전)": l1,
-                            "수정본(후)": l2,
-                            "상태": "❌ 불일치/순서오류"
+                    if header_idx is not None:
+                        df_clean = pd.read_excel(excel_file, skiprows=header_idx + 1)
+                    else:
+                        df_clean = df_raw
+
+                    # 사용자가 선택한 언어(영문명 또는 한글명) 컬럼 추출
+                    if check_lang in df_clean.columns:
+                        standard_list = df_clean[check_lang].dropna().astype(str).tolist()
+                    else:
+                        st.error(f"엑셀에 '{check_lang}' 컬럼이 없습니다. 컬럼명을 확인해주세요.")
+                        st.stop()
+
+                    # [2] OCR 및 대조
+                    img, ocr_data = get_data_from_upload(pdf_file)
+                    extracted_list = get_all_texts(ocr_data)
+
+                    comparison = []
+                    max_len = max(len(standard_list), len(extracted_list))
+
+                    for i in range(max_len):
+                        std = standard_list[i] if i < len(standard_list) else "(엑셀 없음)"
+                        ext = extracted_list[i] if i < len(extracted_list) else "(이미지 없음)"
+                        
+                        ratio = SequenceMatcher(None, clean_text(std), clean_text(ext)).ratio()
+                        
+                        if clean_text(std) == clean_text(ext):
+                            status = "✅ 일치"
+                        elif ratio > 0.6: # 한글은 획이 복잡해 영문보다 조금 낮게 설정 가능
+                            status = "🔍 오타 의심"
+                        else:
+                            status = "❌ 순서오류/누락"
+                        
+                        comparison.append({
+                            "순번": i + 1,
+                            "엑셀 표준": std,
+                            "이미지 추출": ext,
+                            "상태": status
                         })
 
-                # 이미지 위에 빨간색 음영 표시 (픽셀 차이 구역)
-                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                for cnt in contours:
-                    if cv2.contourArea(cnt) > 300:
-                        x, y, bw, bh = cv2.boundingRect(cnt)
-                        roi = overlay[y:y+bh, x:x+bw]
-                        red = np.full(roi.shape, (255, 0, 0), dtype=np.uint8)
-                        overlay[y:y+bh, x:x+bw] = cv2.addWeighted(roi, 0.7, red, 0.3, 0)
+                    st.table(pd.DataFrame(comparison))
+                except Exception as e:
+                    st.error(f"에러 발생: {e}")
 
-                # 출력
-                col1, col2 = st.columns(2)
-                with col1: st.image(img1_res, caption="원본(수정 전)")
-                with col2: st.image(overlay, caption="변경 감지(빨간 음영)")
-                
-                st.subheader("📋 정밀 대조 리포트")
-                if changes:
-                    st.table(pd.DataFrame(changes))
-                    st.error("순서 혹은 내용이 일치하지 않는 구간이 발견되었습니다.")
-                else:
-                    st.success("모든 문구의 순서와 내용이 일치합니다.")
-
-            except Exception as e:
-                st.error(f"분석 오류: {e}")
+# ... (이하 PDF vs PDF 모드 생략)
